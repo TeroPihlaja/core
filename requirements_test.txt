@@ -7,7 +7,7 @@
 
 -c homeassistant/package_constraints.txt
 -r requirements_test_pre_commit.txt
-astroid==4.0.4
+astroid==4.1.2
 coverage==7.13.5
 freezegun==1.5.5
 # librt is an internal mypy dependency
