@@ -122,6 +122,7 @@ def mock_addon_info(
         supervisor_api=False,
         supervisor_role="default",
         icon=False,
+        auto_update=False,
     )
     addon_info.name = "test"
     addon_info.to_dict = MethodType(

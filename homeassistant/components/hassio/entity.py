@@ -2,29 +2,20 @@
 
 from __future__ import annotations
 
-from typing import Any
-
+from aiohasupervisor.models.base import ContainerStats
 from aiohasupervisor.models.mounts import CIFSMountResponse, NFSMountResponse
 
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import EntityDescription
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import (
-    ATTR_SLUG,
-    CONTAINER_STATS,
-    DATA_KEY_ADDONS,
-    DATA_KEY_CORE,
-    DATA_KEY_HOST,
-    DATA_KEY_MOUNTS,
-    DATA_KEY_OS,
-    DATA_KEY_SUPERVISOR,
-    DOMAIN,
-)
+from .const import CONTAINER_STATS, DOMAIN
 from .coordinator import (
+    AddonData,
     HassioAddOnDataUpdateCoordinator,
     HassioMainDataUpdateCoordinator,
     HassioStatsDataUpdateCoordinator,
+    StatsDataKey,
 )
 
 
@@ -39,7 +30,7 @@ class HassioStatsEntity(CoordinatorEntity[HassioStatsDataUpdateCoordinator]):
         entity_description: EntityDescription,
         *,
         container_id: str,
-        data_key: str,
+        data_key: StatsDataKey,
         device_id: str,
         unique_id_prefix: str,
     ) -> None:
@@ -52,22 +43,19 @@ class HassioStatsEntity(CoordinatorEntity[HassioStatsDataUpdateCoordinator]):
         self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, device_id)})
 
     @property
+    def _stats(self) -> ContainerStats | None:
+        """Return the stats object for this entity's container."""
+        data = self.coordinator.data
+        if self._data_key == StatsDataKey.ADDONS:
+            return data.addons.get(self._container_id)
+        if self._data_key == StatsDataKey.CORE:
+            return data.core
+        return data.supervisor
+
+    @property
     def available(self) -> bool:
         """Return True if entity is available."""
-        if self._data_key == DATA_KEY_ADDONS:
-            return (
-                super().available
-                and DATA_KEY_ADDONS in self.coordinator.data
-                and self.entity_description.key
-                in (
-                    self.coordinator.data[DATA_KEY_ADDONS].get(self._container_id) or {}
-                )
-            )
-        return (
-            super().available
-            and self._data_key in self.coordinator.data
-            and self.entity_description.key in self.coordinator.data[self._data_key]
-        )
+        return super().available and self._stats is not None
 
     async def async_added_to_hass(self) -> None:
         """Subscribe to stats updates."""
@@ -94,24 +82,19 @@ class HassioAddonEntity(CoordinatorEntity[HassioAddOnDataUpdateCoordinator]):
         self,
         coordinator: HassioAddOnDataUpdateCoordinator,
         entity_description: EntityDescription,
-        addon: dict[str, Any],
+        addon: AddonData,
     ) -> None:
         """Initialize base entity."""
         super().__init__(coordinator)
         self.entity_description = entity_description
-        self._addon_slug = addon[ATTR_SLUG]
-        self._attr_unique_id = f"{addon[ATTR_SLUG]}_{entity_description.key}"
-        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, addon[ATTR_SLUG])})
+        self._addon_slug = addon.addon.slug
+        self._attr_unique_id = f"{addon.addon.slug}_{entity_description.key}"
+        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, addon.addon.slug)})
 
     @property
     def available(self) -> bool:
         """Return True if entity is available."""
-        return (
-            super().available
-            and DATA_KEY_ADDONS in self.coordinator.data
-            and self.entity_description.key
-            in self.coordinator.data[DATA_KEY_ADDONS].get(self._addon_slug, {})
-        )
+        return super().available and self._addon_slug in self.coordinator.data.addons
 
     async def async_added_to_hass(self) -> None:
         """Subscribe to addon info updates."""
@@ -142,11 +125,7 @@ class HassioOSEntity(CoordinatorEntity[HassioMainDataUpdateCoordinator]):
     @property
     def available(self) -> bool:
         """Return True if entity is available."""
-        return (
-            super().available
-            and DATA_KEY_OS in self.coordinator.data
-            and self.entity_description.key in self.coordinator.data[DATA_KEY_OS]
-        )
+        return super().available and self.coordinator.data.os is not None
 
 
 class HassioHostEntity(CoordinatorEntity[HassioMainDataUpdateCoordinator]):
@@ -165,15 +144,6 @@ class HassioHostEntity(CoordinatorEntity[HassioMainDataUpdateCoordinator]):
         self._attr_unique_id = f"home_assistant_host_{entity_description.key}"
         self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, "host")})
 
-    @property
-    def available(self) -> bool:
-        """Return True if entity is available."""
-        return (
-            super().available
-            and DATA_KEY_HOST in self.coordinator.data
-            and self.entity_description.key in self.coordinator.data[DATA_KEY_HOST]
-        )
-
 
 class HassioSupervisorEntity(CoordinatorEntity[HassioMainDataUpdateCoordinator]):
     """Base Entity for Supervisor."""
@@ -191,16 +161,6 @@ class HassioSupervisorEntity(CoordinatorEntity[HassioMainDataUpdateCoordinator])
         self._attr_unique_id = f"home_assistant_supervisor_{entity_description.key}"
         self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, "supervisor")})
 
-    @property
-    def available(self) -> bool:
-        """Return True if entity is available."""
-        return (
-            super().available
-            and DATA_KEY_SUPERVISOR in self.coordinator.data
-            and self.entity_description.key
-            in self.coordinator.data[DATA_KEY_SUPERVISOR]
-        )
-
 
 class HassioCoreEntity(CoordinatorEntity[HassioMainDataUpdateCoordinator]):
     """Base Entity for Core."""
@@ -217,15 +177,6 @@ class HassioCoreEntity(CoordinatorEntity[HassioMainDataUpdateCoordinator]):
         self.entity_description = entity_description
         self._attr_unique_id = f"home_assistant_core_{entity_description.key}"
         self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, "core")})
-
-    @property
-    def available(self) -> bool:
-        """Return True if entity is available."""
-        return (
-            super().available
-            and DATA_KEY_CORE in self.coordinator.data
-            and self.entity_description.key in self.coordinator.data[DATA_KEY_CORE]
-        )
 
 
 class HassioMountEntity(CoordinatorEntity[HassioMainDataUpdateCoordinator]):
@@ -253,7 +204,4 @@ class HassioMountEntity(CoordinatorEntity[HassioMainDataUpdateCoordinator]):
     @property
     def available(self) -> bool:
         """Return True if entity is available."""
-        return (
-            super().available
-            and self._mount.name in self.coordinator.data[DATA_KEY_MOUNTS]
-        )
+        return super().available and self._mount.name in self.coordinator.data.mounts
