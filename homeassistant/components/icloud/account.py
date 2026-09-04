@@ -105,7 +105,19 @@ class IcloudAccount:
         self.photo_cache: PhotoCache | None = None
 
     def setup(self) -> None:
-        """Set up an iCloud account."""
+        """Set up an iCloud account.
+
+        The fetch timer is only armed once _setup() reaches update_devices(),
+        so make sure an account that gave up early still polls again later
+        instead of sitting loaded and idle until Home Assistant restarts.
+        """
+        self._setup()
+        if self._unsub_fetch is None:
+            self._fetch_interval = self._max_interval
+            self._schedule_next_fetch()
+
+    def _setup(self) -> None:
+        """Log in and read the account's devices."""
         try:
             self.api = PyiCloudService(
                 self._username,
@@ -169,6 +181,10 @@ class IcloudAccount:
 
         if self.api.requires_2fa:
             self._require_reauth()
+            # Keep the timer running so polling resumes by itself once the
+            # user has entered their verification code.
+            self._fetch_interval = self._max_interval
+            self._schedule_next_fetch()
             return
 
         api_devices = {}
@@ -319,15 +335,40 @@ class IcloudAccount:
             )
 
     def keep_alive(self, now=None) -> None:
-        """Keep the API alive."""
+        """Keep the API alive.
+
+        This runs from a timer callback, so anything raised here escapes into
+        the event loop and no further fetch is ever scheduled, leaving the
+        devices frozen at their last known state until Home Assistant is
+        restarted. Every failure path therefore has to schedule the next fetch.
+        """
         if self.api is None:
-            self.setup()
+            try:
+                self.setup()
+            except Exception:
+                # setup() reports its own failures; it must not stop the loop.
+                # Whatever session it did establish is kept: the failure may
+                # have come after logging in, and re-logging in every cycle
+                # for the length of an iCloud outage helps nobody.
+                _LOGGER.exception("Error setting up iCloud account, will retry")
 
         if self.api is None:
+            # Still no session. Try again at the longest interval rather than
+            # giving up, so the account recovers on its own once iCloud is
+            # reachable again or the user has finished logging in.
+            self._fetch_interval = self._max_interval
+            self._schedule_next_fetch()
             return
 
-        self.api.authenticate()
-        self.update_devices()
+        try:
+            self.api.authenticate()
+            self.update_devices()
+        except Exception:
+            # update_devices() reschedules itself on the errors it handles;
+            # this covers the rest, such as a device missing fields.
+            _LOGGER.exception("Error updating iCloud devices, will retry")
+            self._fetch_interval = 2
+            self._schedule_next_fetch()
 
     def get_devices_with_name(self, name: str) -> list[Any]:
         """Get devices by name."""
