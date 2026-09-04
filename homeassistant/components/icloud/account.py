@@ -1,6 +1,6 @@
 """iCloud account."""
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 import logging
 import operator
 from typing import TYPE_CHECKING, Any
@@ -42,8 +42,10 @@ from .const import (
     DEVICE_ID,
     DEVICE_LOCATION,
     DEVICE_LOCATION_HORIZONTAL_ACCURACY,
+    DEVICE_LOCATION_IS_OLD,
     DEVICE_LOCATION_LATITUDE,
     DEVICE_LOCATION_LONGITUDE,
+    DEVICE_LOCATION_TIMESTAMP,
     DEVICE_LOST_MODE_CAPABLE,
     DEVICE_LOW_POWER_MODE,
     DEVICE_NAME,
@@ -362,6 +364,11 @@ class IcloudAccount:
         return self._fetch_interval
 
     @property
+    def max_interval(self) -> int:
+        """Return the longest interval between two fetches, in minutes."""
+        return self._max_interval
+
+    @property
     def devices(self) -> dict[str, Any]:
         """Return the account devices."""
         return self._devices
@@ -429,12 +436,57 @@ class IcloudDevice:
 
             if (
                 self._status[DEVICE_LOCATION]
-                and self._status[DEVICE_LOCATION][DEVICE_LOCATION_LATITUDE]
+                and self._status[DEVICE_LOCATION][DEVICE_LOCATION_LATITUDE] is not None
+                and self._status[DEVICE_LOCATION][DEVICE_LOCATION_LONGITUDE] is not None
             ):
                 location = self._status[DEVICE_LOCATION]
-                if self._location is None:
-                    dispatcher_send(self._account.hass, self._account.signal_device_new)
-                self._location = location
+                if self._is_stale(location):
+                    # Drop the fix rather than keep the device pinned to a
+                    # place it has since left. Without coordinates the tracker
+                    # reports "unknown" - honest about not knowing, where the
+                    # cached fix would have kept claiming it was still home.
+                    self._location = None
+                else:
+                    if self._location is None:
+                        dispatcher_send(
+                            self._account.hass, self._account.signal_device_new
+                        )
+                    self._location = location
+
+    def _is_stale(self, location: dict[str, Any]) -> bool:
+        """Return whether a location fix is too old to be trusted.
+
+        Both signals are needed, because neither is sufficient alone:
+
+        iCloud sets `isOld` whenever it is serving a cached fix rather than a
+        fresh one, which includes a device that has merely been asleep for a
+        moment. Acting on that flag by itself would drop perfectly good
+        locations and make trackers flap in and out of their zone.
+
+        The age of the fix alone is no better: a device sitting still is
+        legitimately reported with an old timestamp while iCloud still
+        considers the fix current, and discarding those would throw away the
+        only location such a device ever reports.
+
+        So a fix is only discarded when iCloud says it is cached *and* it is
+        older than the longest gap between two fetches, meaning a fresher one
+        should already have arrived. The half-interval of headroom keeps a fix
+        that merely lands late from being treated as stale.
+
+        The configured maximum is used rather than the current fetch interval,
+        which is recomputed after this runs and drops as low as fifteen
+        seconds while devices are still pending - a threshold that short would
+        discard every cached fix there is.
+        """
+        if not location.get(DEVICE_LOCATION_IS_OLD):
+            return False
+
+        if (timestamp := location.get(DEVICE_LOCATION_TIMESTAMP)) is None:
+            return False
+
+        # iCloud reports the fix time in milliseconds.
+        age = utcnow() - datetime.fromtimestamp(timestamp / 1000, tz=UTC)
+        return age.total_seconds() > self._account.max_interval * 60 * 1.5
 
     def play_sound(self) -> None:
         """Play sound on the device."""

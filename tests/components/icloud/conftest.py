@@ -1,12 +1,15 @@
 """Configure iCloud tests."""
 
 from collections.abc import Generator
+from datetime import UTC, datetime
 from unittest.mock import patch
 
 from pyicloud.services.photos import AlbumContainer, PhotoAlbumFolder, PhotoAsset
 import pytest
 
 from homeassistant.components.icloud.const import DOMAIN
+
+from .const import DEVICE, USER_INFO
 
 from tests.common import AsyncMock, MockConfigEntry
 from tests.typing import MagicMock
@@ -139,3 +142,65 @@ def mock_config_entry() -> MockConfigEntry:
             "gps_accuracy_threshold": 0,
         },
     )
+
+
+class MockAppleDevice:
+    """An Apple device whose reported status can change between fetches."""
+
+    def __init__(self, status: dict) -> None:
+        """Store the status this device reports."""
+        self._status = status
+
+    def status(self, fields) -> dict:
+        """Return the current status."""
+        return self._status
+
+    def __getitem__(self, key):
+        """Proxy into the raw status."""
+        return self._status.get(key)
+
+
+class MockDevices:
+    """The devices of an account."""
+
+    def __init__(self, user_info: dict, devices: list[MockAppleDevice]) -> None:
+        """Store the account's devices."""
+        self.user_info = user_info
+        self._devices = devices
+
+    def __iter__(self):
+        """Iterate over the devices."""
+        return iter(self._devices)
+
+    def __len__(self) -> int:
+        """Return the number of devices."""
+        return len(self._devices)
+
+    def __getitem__(self, index):
+        """Return the status of a device."""
+        return self._devices[index].status(None)
+
+    def refresh(self, locate: bool = True) -> None:
+        """Match the FindMyiPhone service interface."""
+
+
+@pytest.fixture(name="locating_service")
+def mock_locating_service() -> Generator[tuple[MagicMock, dict]]:
+    """Mock an account with one device that reports a location."""
+    status = {
+        **DEVICE,
+        "location": {
+            "latitude": 1.0,
+            "longitude": 2.0,
+            "horizontalAccuracy": 10,
+            "isOld": False,
+            "timeStamp": datetime.now(tz=UTC).timestamp() * 1000,
+        },
+    }
+    with patch(
+        "homeassistant.components.icloud.account.PyiCloudService"
+    ) as service_mock:
+        service = service_mock.return_value
+        service.requires_2fa = False
+        service.devices = MockDevices(USER_INFO, [MockAppleDevice(status)])
+        yield service, status
